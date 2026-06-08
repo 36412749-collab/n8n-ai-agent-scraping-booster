@@ -23,8 +23,8 @@ If you are a business owner looking to:
 ### 🎯 Let's Talk! 
 I am an independent Full-Stack & AI Automation Developer. I design high-performance, tailored workflows that solve real business bottlenecks. **No solution, no charge.**
 
-* **📧 Email**: nbjack9897@gmail.com
-* **💬 Telegram**: https://t.me/your_telegram_username (18158799897wechat)
+
+* **📧 Primary Contact Email**: [nbjack9897@gmail.com](mailto:nbjack9897@gmail.com)
 * **💸 Accepted Payments**: Standard Wire, PayPal, Solana (SOL) / USDT / Crypto
 
 *Feel free to reach out directly to discuss your business automation goals!*
