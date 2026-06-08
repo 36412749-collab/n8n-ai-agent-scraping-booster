@@ -1,0 +1,57 @@
+{
+  "log": {
+    "level": "info"
+  },
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-in",
+      "listen": "0.0.0.0",
+      "listen_port": 44300,
+      "sniff": false,
+      "users": [
+        {
+          "uuid": "0a1acb7e-04d9-406d-8ff9-faee5ffe15ba",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "dl.google.com",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "dl.google.com",
+            "server_port": 443
+          },
+          "private_key": "-I-LKugNMHT8WIOT2W_IaNWrEsLvzaPmM4qR-EC7t0k",
+          "short_id": [
+            "a166f1c74dc58e"
+          ]
+        }
+      }
+    },
+    {
+      "type": "hysteria2",
+      "tag": "hysteria2-in",
+      "listen": "0.0.0.0",
+      "listen_port": 48443,
+      "users": [
+        {
+          "password": "ag_secure_2026"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "certificate_path": "/etc/sing-box/server.crt",
+        "key_path": "/etc/sing-box/server.key"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ]
+}

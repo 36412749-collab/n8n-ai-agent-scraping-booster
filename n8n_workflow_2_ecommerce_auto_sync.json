@@ -1,0 +1,441 @@
+{
+  "name": "E-Commerce Auto Sync — Shopify ↔ Amazon + Claude Descriptions",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 2
+            }
+          ]
+        }
+      },
+      "id": "b2c3d4e5-0001-4f5a-9b0c-222222222201",
+      "name": "Schedule — Every 2 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 340]
+    },
+    {
+      "parameters": {
+        "resource": "product",
+        "operation": "getAll",
+        "returnAll": false,
+        "limit": 50,
+        "options": {
+          "fields": "id,title,body_html,variants,inventory_quantity,sku,tags"
+        }
+      },
+      "id": "b2c3d4e5-0002-4f5a-9b0c-222222222202",
+      "name": "Shopify — Fetch Products",
+      "type": "n8n-nodes-base.shopify",
+      "typeVersion": 1,
+      "position": [480, 240],
+      "credentials": {
+        "shopifyApi": {
+          "id": "SHOPIFY_CREDENTIAL_ID",
+          "name": "Shopify Store API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "returnAll": false,
+        "limit": 50,
+        "options": {
+          "marketplaceIds": "={{ $env.AMAZON_MARKETPLACE_ID }}"
+        }
+      },
+      "id": "b2c3d4e5-0003-4f5a-9b0c-222222222203",
+      "name": "Amazon SP-API — Fetch Listings",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 440],
+      "parameters_extra_note": "Uses Amazon Selling Partner API via signed HTTP requests"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "mergeByFields": {
+          "values": [
+            {
+              "field1": "sku",
+              "field2": "sellerSku"
+            }
+          ]
+        },
+        "joinMode": "enrichInput1",
+        "options": {}
+      },
+      "id": "b2c3d4e5-0004-4f5a-9b0c-222222222204",
+      "name": "Merge — Match SKU Inventory",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [720, 340]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "inventory-mismatch",
+              "leftValue": "={{ $json.variants[0].inventory_quantity }}",
+              "rightValue": "={{ $json.fulfillableQuantity }}",
+              "operator": {
+                "type": "number",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b2c3d4e5-0005-4f5a-9b0c-222222222205",
+      "name": "IF — Inventory Mismatch?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [960, 340]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "items = _input.all()\nresults = []\nfor item in items:\n    shopify_qty = item.json.get('variants', [{}])[0].get('inventory_quantity', 0)\n    amazon_qty = item.json.get('fulfillableQuantity', 0)\n    master_qty = min(shopify_qty, amazon_qty) if shopify_qty and amazon_qty else max(shopify_qty, amazon_qty)\n    \n    results.append({\n        'json': {\n            'sku': item.json.get('sku', item.json.get('sellerSku', '')),\n            'title': item.json.get('title', ''),\n            'shopify_qty': shopify_qty,\n            'amazon_qty': amazon_qty,\n            'synced_qty': master_qty,\n            'shopify_product_id': item.json.get('id', ''),\n            'amazon_asin': item.json.get('asin', ''),\n            'needs_description': not item.json.get('body_html', '').strip() or len(item.json.get('body_html', '')) < 100\n        }\n    })\nreturn results"
+      },
+      "id": "b2c3d4e5-0006-4f5a-9b0c-222222222206",
+      "name": "Python — Compute Master Inventory",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 240]
+    },
+    {
+      "parameters": {
+        "resource": "product",
+        "operation": "update",
+        "productId": "={{ $json.shopify_product_id }}",
+        "updateFields": {
+          "variants": [
+            {
+              "inventory_quantity": "={{ $json.synced_qty }}"
+            }
+          ]
+        }
+      },
+      "id": "b2c3d4e5-0007-4f5a-9b0c-222222222207",
+      "name": "Shopify — Update Inventory",
+      "type": "n8n-nodes-base.shopify",
+      "typeVersion": 1,
+      "position": [1440, 180],
+      "credentials": {
+        "shopifyApi": {
+          "id": "SHOPIFY_CREDENTIAL_ID",
+          "name": "Shopify Store API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://sellingpartnerapi.amazon.com/listings/2021-08-01/items/{{ $env.AMAZON_SELLER_ID }}/{{ $json.sku }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"productType\": \"PRODUCT\", \"patches\": [{ \"op\": \"replace\", \"path\": \"/attributes/fulfillment_availability\", \"value\": [{ \"fulfillment_channel_code\": \"DEFAULT\", \"quantity\": {{ $json.synced_qty }} }] }] }",
+        "options": {}
+      },
+      "id": "b2c3d4e5-0008-4f5a-9b0c-222222222208",
+      "name": "Amazon — Update Inventory",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "needs-desc",
+              "leftValue": "={{ $json.needs_description }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b2c3d4e5-0009-4f5a-9b0c-222222222209",
+      "name": "IF — Needs AI Description?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1200, 480]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-20250514\",\n  \"max_tokens\": 1024,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Write a high-converting, SEO-optimized product description for global e-commerce. Product: {{ $json.title }}. SKU: {{ $json.sku }}. Include: compelling headline, 3 bullet benefits, technical specs paragraph, and CTA. Output HTML suitable for Shopify.\"\n    }\n  ]\n}",
+        "options": {}
+      },
+      "id": "b2c3d4e5-0010-4f5a-9b0c-222222222210",
+      "name": "Claude API — Generate Description",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 480],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "CLAUDE_API_CREDENTIAL_ID",
+          "name": "Claude API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "items = _input.all()\nresults = []\nfor item in items:\n    content_blocks = item.json.get('content', [])\n    description = ''\n    for block in content_blocks:\n        if block.get('type') == 'text':\n            description = block.get('text', '')\n            break\n    \n    results.append({\n        'json': {\n            'sku': item.json.get('sku', ''),\n            'shopify_product_id': item.json.get('shopify_product_id', ''),\n            'generated_description': description,\n            'sync_status': 'complete',\n            'synced_at': '{{ $now.toISO() }}'\n        }\n    })\nreturn results"
+      },
+      "id": "b2c3d4e5-0011-4f5a-9b0c-222222222211",
+      "name": "Python — Parse Claude Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1680, 480]
+    },
+    {
+      "parameters": {
+        "resource": "product",
+        "operation": "update",
+        "productId": "={{ $json.shopify_product_id }}",
+        "updateFields": {
+          "body_html": "={{ $json.generated_description }}"
+        }
+      },
+      "id": "b2c3d4e5-0012-4f5a-9b0c-222222222212",
+      "name": "Shopify — Publish AI Description",
+      "type": "n8n-nodes-base.shopify",
+      "typeVersion": 1,
+      "position": [1920, 480],
+      "credentials": {
+        "shopifyApi": {
+          "id": "SHOPIFY_CREDENTIAL_ID",
+          "name": "Shopify Store API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.SYNC_LOG_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "SyncLog",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "sku": "={{ $json.sku }}",
+            "synced_qty": "={{ $json.synced_qty }}",
+            "sync_status": "={{ $json.sync_status || 'inventory_synced' }}",
+            "synced_at": "={{ $now.toISO() }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "b2c3d4e5-0013-4f5a-9b0c-222222222213",
+      "name": "Google Sheets — Log Sync",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1680, 240]
+    }
+  ],
+  "connections": {
+    "Schedule — Every 2 Hours": {
+      "main": [
+        [
+          {
+            "node": "Shopify — Fetch Products",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Amazon SP-API — Fetch Listings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shopify — Fetch Products": {
+      "main": [
+        [
+          {
+            "node": "Merge — Match SKU Inventory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Amazon SP-API — Fetch Listings": {
+      "main": [
+        [
+          {
+            "node": "Merge — Match SKU Inventory",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge — Match SKU Inventory": {
+      "main": [
+        [
+          {
+            "node": "IF — Inventory Mismatch?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF — Inventory Mismatch?": {
+      "main": [
+        [
+          {
+            "node": "Python — Compute Master Inventory",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "IF — Needs AI Description?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Python — Compute Master Inventory": {
+      "main": [
+        [
+          {
+            "node": "Shopify — Update Inventory",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Amazon — Update Inventory",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Google Sheets — Log Sync",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF — Needs AI Description?": {
+      "main": [
+        [
+          {
+            "node": "Claude API — Generate Description",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Claude API — Generate Description": {
+      "main": [
+        [
+          {
+            "node": "Python — Parse Claude Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Python — Parse Claude Response": {
+      "main": [
+        [
+          {
+            "node": "Shopify — Publish AI Description",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "ecommerce",
+      "createdAt": "2026-06-08T00:00:00.000Z",
+      "updatedAt": "2026-06-08T00:00:00.000Z",
+      "id": "tag-ecommerce"
+    },
+    {
+      "name": "shopify-amazon",
+      "createdAt": "2026-06-08T00:00:00.000Z",
+      "updatedAt": "2026-06-08T00:00:00.000Z",
+      "id": "tag-shopify-amazon"
+    }
+  ],
+  "triggerCount": 1,
+  "updatedAt": "2026-06-08T12:00:00.000Z",
+  "versionId": "wf2-v1.0.0",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "n8n-ai-agent-scraping-booster"
+  }
+}

@@ -1,0 +1,295 @@
+{
+  "name": "AI Lead Scraper — ISP Proxy Rotation + OpenAI Scoring",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-intake",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": false
+        }
+      },
+      "id": "a1b2c3d4-0001-4e5f-9a0b-111111111101",
+      "name": "Webhook — Lead Intake",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "lead-intake-webhook"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import random\nimport json\n\n# Static ISP proxy pool — rotate per request\nPROXY_POOL = [\n    {\"host\": \"isp-us-01.proxyfleet.io\", \"port\": 8080, \"user\": \"{{$env.ISP_PROXY_USER}}\", \"pass\": \"{{$env.ISP_PROXY_PASS}}\"},\n    {\"host\": \"isp-eu-02.proxyfleet.io\", \"port\": 8080, \"user\": \"{{$env.ISP_PROXY_USER}}\", \"pass\": \"{{$env.ISP_PROXY_PASS}}\"},\n    {\"host\": \"isp-ap-03.proxyfleet.io\", \"port\": 8080, \"user\": \"{{$env.ISP_PROXY_USER}}\", \"pass\": \"{{$env.ISP_PROXY_PASS}}\"},\n    {\"host\": \"isp-uk-04.proxyfleet.io\", \"port\": 8080, \"user\": \"{{$env.ISP_PROXY_USER}}\", \"pass\": \"{{$env.ISP_PROXY_PASS}}\"}\n]\n\nproxy = random.choice(PROXY_POOL)\nproxy_url = f\"http://{proxy['user']}:{proxy['pass']}@{proxy['host']}:{proxy['port']}\"\n\nitems = _input.all()\nresults = []\nfor item in items:\n    body = item.json.get('body', item.json)\n    results.append({\n        'json': {\n            'target_url': body.get('url', ''),\n            'company': body.get('company', ''),\n            'contact_email': body.get('email', ''),\n            'proxy_url': proxy_url,\n            'proxy_host': proxy['host'],\n            'rotation_id': f\"rot-{random.randint(100000, 999999)}\"\n        }\n    })\nreturn results"
+      },
+      "id": "a1b2c3d4-0002-4e5f-9a0b-111111111102",
+      "name": "Python — Rotate ISP Proxy",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.target_url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpProxyAuth",
+        "options": {
+          "proxy": "={{ $json.proxy_url }}",
+          "timeout": 30000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": true,
+              "maxRedirects": 5
+            }
+          }
+        }
+      },
+      "id": "a1b2c3d4-0003-4e5f-9a0b-111111111103",
+      "name": "HTTP — Scrape Target Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 300],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import re\nimport json\n\nitems = _input.all()\nresults = []\nfor item in items:\n    html = str(item.json.get('data', item.json.get('body', '')))\n    company = item.json.get('company', '')\n    email = item.json.get('contact_email', '')\n    \n  # Extract structured signals\n    title_match = re.search(r'<title[^>]*>([^<]+)</title>', html, re.I)\n    emails = list(set(re.findall(r'[\\w.+-]+@[\\w-]+\\.[\\w.-]+', html)))\n    phones = list(set(re.findall(r'\\+?[\\d\\s()-]{10,18}', html)))\n    \n    results.append({\n        'json': {\n            'company': company,\n            'contact_email': email or (emails[0] if emails else ''),\n            'page_title': title_match.group(1).strip() if title_match else '',\n            'emails_found': emails[:5],\n            'phones_found': phones[:3],\n            'proxy_host': item.json.get('proxy_host', ''),\n            'html_length': len(html),\n            'scrape_status': 'success' if len(html) > 500 else 'partial'\n        }\n    })\nreturn results"
+      },
+      "id": "a1b2c3d4-0004-4e5f-9a0b-111111111104",
+      "name": "Python — Extract Lead Signals",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [960, 300]
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "complete",
+        "model": "gpt-4o-mini",
+        "prompt": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "You are a B2B lead qualification engine. Score leads 0-100 based on company signals, contact quality, and buying intent. Return ONLY valid JSON with keys: score, tier (hot/warm/cold), reasoning, recommended_action."
+            },
+            {
+              "role": "user",
+              "content": "=Qualify this lead:\nCompany: {{ $json.company }}\nEmail: {{ $json.contact_email }}\nPage Title: {{ $json.page_title }}\nEmails Found: {{ $json.emails_found }}\nPhones Found: {{ $json.phones_found }}\nScrape Status: {{ $json.scrape_status }}\nProxy Used: {{ $json.proxy_host }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.2,
+          "maxTokens": 512
+        }
+      },
+      "id": "a1b2c3d4-0005-4e5f-9a0b-111111111105",
+      "name": "OpenAI — Auto Lead Scoring",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1.4,
+      "position": [1200, 300],
+      "credentials": {
+        "openAiApi": {
+          "id": "OPENAI_CREDENTIAL_ID",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import json\n\nitems = _input.all()\nresults = []\nfor item in items:\n    ai_response = item.json.get('message', {}).get('content', item.json.get('text', '{}'))\n    try:\n        score_data = json.loads(ai_response)\n    except:\n        score_data = {'score': 0, 'tier': 'cold', 'reasoning': 'parse_error', 'recommended_action': 'retry'}\n    \n    results.append({\n        'json': {\n            'lead_id': f\"LEAD-{item.json.get('rotation_id', '000')}\",\n            'company': item.json.get('company', ''),\n            'contact_email': item.json.get('contact_email', ''),\n            'score': score_data.get('score', 0),\n            'tier': score_data.get('tier', 'cold'),\n            'reasoning': score_data.get('reasoning', ''),\n            'recommended_action': score_data.get('recommended_action', ''),\n            'proxy_host': item.json.get('proxy_host', ''),\n            'qualified_at': '{{ $now.toISO() }}'\n        }\n    })\nreturn results"
+      },
+      "id": "a1b2c3d4-0006-4e5f-9a0b-111111111106",
+      "name": "Python — Structure Lead Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1440, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "a1b2c3d4-0007-4e5f-9a0b-111111111107",
+      "name": "Respond — Qualified Lead JSON",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1680, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "hot-lead-filter",
+              "leftValue": "={{ $json.tier }}",
+              "rightValue": "hot",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0008-4e5f-9a0b-111111111108",
+      "name": "IF — Hot Lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1440, 520]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CRM_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0009-4e5f-9a0b-111111111109",
+      "name": "HTTP — Push to CRM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1680, 520]
+    }
+  ],
+  "connections": {
+    "Webhook — Lead Intake": {
+      "main": [
+        [
+          {
+            "node": "Python — Rotate ISP Proxy",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Python — Rotate ISP Proxy": {
+      "main": [
+        [
+          {
+            "node": "HTTP — Scrape Target Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP — Scrape Target Page": {
+      "main": [
+        [
+          {
+            "node": "Python — Extract Lead Signals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Python — Extract Lead Signals": {
+      "main": [
+        [
+          {
+            "node": "OpenAI — Auto Lead Scoring",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI — Auto Lead Scoring": {
+      "main": [
+        [
+          {
+            "node": "Python — Structure Lead Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Python — Structure Lead Output": {
+      "main": [
+        [
+          {
+            "node": "Respond — Qualified Lead JSON",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "IF — Hot Lead?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF — Hot Lead?": {
+      "main": [
+        [
+          {
+            "node": "HTTP — Push to CRM",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "lead-generation",
+      "createdAt": "2026-06-08T00:00:00.000Z",
+      "updatedAt": "2026-06-08T00:00:00.000Z",
+      "id": "tag-lead-gen"
+    },
+    {
+      "name": "proxy-rotation",
+      "createdAt": "2026-06-08T00:00:00.000Z",
+      "updatedAt": "2026-06-08T00:00:00.000Z",
+      "id": "tag-proxy"
+    }
+  ],
+  "triggerCount": 1,
+  "updatedAt": "2026-06-08T12:00:00.000Z",
+  "versionId": "wf1-v1.0.0",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "n8n-ai-agent-scraping-booster"
+  }
+}

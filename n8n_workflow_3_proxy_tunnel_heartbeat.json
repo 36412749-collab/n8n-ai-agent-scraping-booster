@@ -1,0 +1,333 @@
+{
+  "name": "Proxy Tunnel Heartbeat — Hysteria2 / Residential Monitor + Telegram Alerts",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "c3d4e5f6-0001-4a5b-9c0d-333333333301",
+      "name": "Schedule — Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 360]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import json\n\n# Tunnel & proxy endpoint registry\nENDPOINTS = [\n    {\n        'name': 'Hysteria2-US-East',\n        'type': 'hysteria2',\n        'health_url': 'https://us-east.hy2.tunnel.local:48443/health',\n        'fallback_proxy': 'residential-us-01.proxyfleet.io:1080',\n        'priority': 1\n    },\n    {\n        'name': 'Hysteria2-EU-West',\n        'type': 'hysteria2',\n        'health_url': 'https://eu-west.hy2.tunnel.local:48443/health',\n        'fallback_proxy': 'residential-eu-02.proxyfleet.io:1080',\n        'priority': 2\n    },\n    {\n        'name': 'Hysteria2-AP-South',\n        'type': 'hysteria2',\n        'health_url': 'https://ap-south.hy2.tunnel.local:48443/health',\n        'fallback_proxy': 'residential-ap-03.proxyfleet.io:1080',\n        'priority': 3\n    },\n    {\n        'name': 'Residential-UK-Backup',\n        'type': 'residential',\n        'health_url': 'https://httpbin.org/ip',\n        'fallback_proxy': 'residential-uk-04.proxyfleet.io:1080',\n        'priority': 4\n    }\n]\n\nreturn [{'json': ep} for ep in ENDPOINTS]"
+      },
+      "id": "c3d4e5f6-0002-4a5b-9c0d-333333333302",
+      "name": "Python — Load Tunnel Registry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 360]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.health_url }}",
+        "options": {
+          "timeout": 15000,
+          "allowUnauthorizedCerts": true,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "c3d4e5f6-0003-4a5b-9c0d-333333333303",
+      "name": "HTTP — Ping Endpoint",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 360]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import time\n\nitems = _input.all()\nresults = []\nfor item in items:\n    status_code = item.json.get('statusCode', item.json.get('status_code', 0))\n    endpoint_name = item.json.get('name', 'unknown')\n    endpoint_type = item.json.get('type', 'unknown')\n    fallback = item.json.get('fallback_proxy', '')\n    priority = item.json.get('priority', 99)\n    \n    is_healthy = status_code == 200\n    \n    results.append({\n        'json': {\n            'endpoint_name': endpoint_name,\n            'endpoint_type': endpoint_type,\n            'status_code': status_code,\n            'is_healthy': is_healthy,\n            'fallback_proxy': fallback,\n            'priority': priority,\n            'checked_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),\n            'action': 'none' if is_healthy else 'switch_to_fallback'\n        }\n    })\nreturn results"
+      },
+      "id": "c3d4e5f6-0004-4a5b-9c0d-333333333304",
+      "name": "Python — Evaluate Health Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [960, 360]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "unhealthy-check",
+              "leftValue": "={{ $json.status_code }}",
+              "rightValue": 200,
+              "operator": {
+                "type": "number",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c3d4e5f6-0005-4a5b-9c0d-333333333305",
+      "name": "IF — status_code != 200?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1200, 360]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import json\n\nitems = _input.all()\nresults = []\nfor item in items:\n    endpoint = item.json.get('endpoint_name', '')\n    fallback = item.json.get('fallback_proxy', '')\n    status = item.json.get('status_code', 0)\n    ep_type = item.json.get('endpoint_type', '')\n    \n    switch_config = {\n        'active_tunnel': fallback,\n        'previous_tunnel': endpoint,\n        'tunnel_type': ep_type,\n        'switched_at': item.json.get('checked_at', ''),\n        'reason': f'Health check failed with status {status}'\n    }\n    \n    results.append({\n        'json': {\n            **item.json,\n            'switch_config': switch_config,\n            'alert_message': f\"🚨 TUNNEL DOWN\\n\\nEndpoint: {endpoint}\\nType: {ep_type}\\nStatus: {status}\\nAction: Switching to {fallback}\\nTime: {item.json.get('checked_at', '')}\"\n        }\n    })\nreturn results"
+      },
+      "id": "c3d4e5f6-0006-4a5b-9c0d-333333333306",
+      "name": "Python — Switch to Fallback Proxy",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1440, 260]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"chat_id\": \"{{ $env.TELEGRAM_CHAT_ID }}\",\n  \"text\": \"{{ $json.alert_message }}\",\n  \"parse_mode\": \"HTML\",\n  \"disable_web_page_preview\": true\n}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "c3d4e5f6-0007-4a5b-9c0d-333333333307",
+      "name": "Telegram — Send Error Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1680, 260]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.PROXY_CONTROLLER_WEBHOOK }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.switch_config) }}",
+        "options": {}
+      },
+      "id": "c3d4e5f6-0008-4a5b-9c0d-333333333308",
+      "name": "HTTP — Apply Proxy Switch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1680, 400]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "items = _input.all()\nhealthy = [i.json for i in items if i.json.get('is_healthy')]\nunhealthy = [i.json for i in items if not i.json.get('is_healthy')]\n\nreturn [{\n    'json': {\n        'heartbeat_summary': {\n            'total_endpoints': len(items),\n            'healthy_count': len(healthy),\n            'unhealthy_count': len(unhealthy),\n            'healthy_endpoints': [h['endpoint_name'] for h in healthy],\n            'unhealthy_endpoints': [u['endpoint_name'] for u in unhealthy],\n            'checked_at': items[0].json.get('checked_at', '') if items else ''\n        }\n    }\n}]"
+      },
+      "id": "c3d4e5f6-0009-4a5b-9c0d-333333333309",
+      "name": "Python — Build Heartbeat Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1440, 520]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "all-healthy",
+              "leftValue": "={{ $json.heartbeat_summary.unhealthy_count }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c3d4e5f6-0010-4a5b-9c0d-333333333310",
+      "name": "IF — All Healthy?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1680, 520]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.HEALTH_LOG_WEBHOOK }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.heartbeat_summary) }}",
+        "options": {}
+      },
+      "id": "c3d4e5f6-0011-4a5b-9c0d-333333333311",
+      "name": "HTTP — Log Healthy Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1920, 520]
+    }
+  ],
+  "connections": {
+    "Schedule — Every 5 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Python — Load Tunnel Registry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Python — Load Tunnel Registry": {
+      "main": [
+        [
+          {
+            "node": "HTTP — Ping Endpoint",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP — Ping Endpoint": {
+      "main": [
+        [
+          {
+            "node": "Python — Evaluate Health Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Python — Evaluate Health Status": {
+      "main": [
+        [
+          {
+            "node": "IF — status_code != 200?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Python — Build Heartbeat Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF — status_code != 200?": {
+      "main": [
+        [
+          {
+            "node": "Python — Switch to Fallback Proxy",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Python — Switch to Fallback Proxy": {
+      "main": [
+        [
+          {
+            "node": "Telegram — Send Error Alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "HTTP — Apply Proxy Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Python — Build Heartbeat Summary": {
+      "main": [
+        [
+          {
+            "node": "IF — All Healthy?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF — All Healthy?": {
+      "main": [
+        [
+          {
+            "node": "HTTP — Log Healthy Status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "network-monitoring",
+      "createdAt": "2026-06-08T00:00:00.000Z",
+      "updatedAt": "2026-06-08T00:00:00.000Z",
+      "id": "tag-network"
+    },
+    {
+      "name": "hysteria2",
+      "createdAt": "2026-06-08T00:00:00.000Z",
+      "updatedAt": "2026-06-08T00:00:00.000Z",
+      "id": "tag-hy2"
+    },
+    {
+      "name": "telegram-alerts",
+      "createdAt": "2026-06-08T00:00:00.000Z",
+      "updatedAt": "2026-06-08T00:00:00.000Z",
+      "id": "tag-telegram"
+    }
+  ],
+  "triggerCount": 1,
+  "updatedAt": "2026-06-08T12:00:00.000Z",
+  "versionId": "wf3-v1.0.0",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "n8n-ai-agent-scraping-booster"
+  }
+}
